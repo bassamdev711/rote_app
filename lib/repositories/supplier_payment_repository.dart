@@ -71,4 +71,25 @@ class SupplierPaymentRepository {
     }
     return 0.0;
   }
+
+  Future<void> recalculateSupplierBalance(String supplierId, {Transaction? txn}) async {
+    Database db = await _dbHelper.database;
+    final action = (Transaction t) async {
+      final result = await t.rawQuery('''
+        SELECT SUM(amount) AS total_balance 
+        FROM supplier_payments 
+        WHERE supplier_id = ? AND is_deleted = 0
+      ''', [supplierId]);
+      
+      double balance = (result.first['total_balance'] as num?)?.toDouble() ?? 0.0;
+      
+      await t.update('suppliers', {'current_balance': balance}, where: 'id = ?', whereArgs: [supplierId]);
+    };
+    
+    if (txn != null) {
+      await action(txn);
+    } else {
+      await db.transaction(action);
+    }
+  }
 }

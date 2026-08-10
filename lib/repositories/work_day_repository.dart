@@ -58,31 +58,31 @@ class WorkDayRepository {
 
 
   Future<void> _verifyDayBalanceToZero(Database db, String workDayId) async {
-    // 1. Get all unique product IDs involved in this workday
-    final List<Map<String, dynamic>> productRows = await db.rawQuery('''
-      SELECT DISTINCT product_id FROM (
-        SELECT product_id FROM inventory_loads WHERE work_day_id = ? AND is_deleted = 0
+    // 1. Get all unique product & supplier combinations involved in this workday
+    final List<Map<String, dynamic>> rows = await db.rawQuery('''
+      SELECT DISTINCT product_id, supplier_id FROM (
+        SELECT product_id, supplier_id FROM inventory_loads WHERE work_day_id = ? AND is_deleted = 0
         UNION
-        SELECT product_id FROM distributions WHERE work_day_id = ? AND is_deleted = 0
+        SELECT product_id, supplier_id FROM distributions WHERE work_day_id = ? AND is_deleted = 0
         UNION
-        SELECT product_id FROM returns WHERE work_day_id = ? AND is_deleted = 0
+        SELECT product_id, supplier_id FROM returns WHERE work_day_id = ? AND is_deleted = 0
         UNION
-        SELECT product_id FROM supplier_returns WHERE work_day_id = ? AND is_deleted = 0
+        SELECT product_id, supplier_id FROM supplier_returns WHERE work_day_id = ? AND is_deleted = 0
         UNION
-        SELECT product_id FROM damaged_items WHERE work_day_id = ? AND is_deleted = 0
+        SELECT product_id, supplier_id FROM damaged_items WHERE work_day_id = ? AND is_deleted = 0
       )
     ''', [workDayId, workDayId, workDayId, workDayId, workDayId]);
 
-    // 2. Check balance for each product
-    for (var row in productRows) {
+    // 2. Check balance for each combination
+    for (var row in rows) {
       final pid = row['product_id'];
+      final sid = row['supplier_id'];
       
-      // get sums
-      final loadRes = await db.rawQuery('SELECT SUM(initial_quantity) as s FROM inventory_loads WHERE work_day_id = ? AND product_id = ? AND is_deleted = 0', [workDayId, pid]);
-      final distRes = await db.rawQuery('SELECT SUM(quantity) as s FROM distributions WHERE work_day_id = ? AND product_id = ? AND is_deleted = 0', [workDayId, pid]);
-      final retRes = await db.rawQuery('SELECT SUM(quantity) as s FROM returns WHERE work_day_id = ? AND product_id = ? AND is_deleted = 0', [workDayId, pid]);
-      final sretRes = await db.rawQuery('SELECT SUM(quantity) as s FROM supplier_returns WHERE work_day_id = ? AND product_id = ? AND is_deleted = 0', [workDayId, pid]);
-      final dmgRes = await db.rawQuery('SELECT SUM(quantity) as s FROM damaged_items WHERE work_day_id = ? AND product_id = ? AND is_deleted = 0', [workDayId, pid]);
+      final loadRes = await db.rawQuery('SELECT SUM(initial_quantity) as s FROM inventory_loads WHERE work_day_id = ? AND product_id = ? AND supplier_id = ? AND is_deleted = 0', [workDayId, pid, sid]);
+      final distRes = await db.rawQuery('SELECT SUM(quantity) as s FROM distributions WHERE work_day_id = ? AND product_id = ? AND supplier_id = ? AND is_deleted = 0', [workDayId, pid, sid]);
+      final retRes = await db.rawQuery('SELECT SUM(quantity) as s FROM returns WHERE work_day_id = ? AND product_id = ? AND supplier_id = ? AND is_deleted = 0', [workDayId, pid, sid]);
+      final sretRes = await db.rawQuery('SELECT SUM(quantity) as s FROM supplier_returns WHERE work_day_id = ? AND product_id = ? AND supplier_id = ? AND is_deleted = 0', [workDayId, pid, sid]);
+      final dmgRes = await db.rawQuery('SELECT SUM(quantity) as s FROM damaged_items WHERE work_day_id = ? AND product_id = ? AND supplier_id = ? AND is_deleted = 0', [workDayId, pid, sid]);
       
       final double load = (loadRes.first['s'] as num?)?.toDouble() ?? 0.0;
       final double dist = (distRes.first['s'] as num?)?.toDouble() ?? 0.0;
@@ -93,7 +93,7 @@ class WorkDayRepository {
       final double remaining = load + ret - dist - sret - dmg;
       
       if (remaining != 0) {
-        throw Exception('لا يمكن إغلاق اليوم. يوجد رصيد غير مسوى لأحد الأصناف. المتبقي: \$remaining');
+        throw Exception('لا يمكن إغلاق اليوم. يوجد رصيد غير مسوى للصنف في أحد المخابز. المتبقي: $remaining');
       }
     }
   }

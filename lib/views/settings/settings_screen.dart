@@ -12,6 +12,7 @@ import 'suppliers_list_screen.dart';
 import '../customers/customers_screen.dart';
 import '../../core/utils/app_utils.dart';
 import 'package:firebase_auth/firebase_auth.dart';
+import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:url_launcher/url_launcher.dart';
 import '../auth/login_screen.dart';
 
@@ -24,12 +25,14 @@ class SettingsScreen extends ConsumerStatefulWidget {
 
 class _SettingsScreenState extends ConsumerState<SettingsScreen> {
   late TextEditingController _nameCtrl;
+  late FocusNode _nameFocusNode;
   bool _nameSaved = false;
 
   @override
   void initState() {
     super.initState();
     _nameCtrl = TextEditingController();
+    _nameFocusNode = FocusNode();
     // Load the current name after the first frame
     WidgetsBinding.instance.addPostFrameCallback((_) {
       final name = ref.read(distributorNameProvider).value ?? '';
@@ -40,6 +43,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
   @override
   void dispose() {
     _nameCtrl.dispose();
+    _nameFocusNode.dispose();
     super.dispose();
   }
 
@@ -69,9 +73,9 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
       body: ListView(
         padding: const EdgeInsets.all(16),
         children: [
-          // ── Distributor Name Card ──
+  // ── Distributor Name Card ──
           Container(
-            padding: const EdgeInsets.all(16),
+            padding: const EdgeInsets.all(20),
             margin: const EdgeInsets.only(bottom: 20),
             decoration: BoxDecoration(
               gradient: const LinearGradient(
@@ -79,55 +83,60 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
                 begin: Alignment.topLeft,
                 end: Alignment.bottomRight,
               ),
-              borderRadius: BorderRadius.circular(16),
+              borderRadius: BorderRadius.circular(20),
               boxShadow: [
-                BoxShadow(color: AppTheme.primary.withOpacity(0.3), blurRadius: 12, offset: const Offset(0, 4)),
+                BoxShadow(color: AppTheme.primary.withOpacity(0.3), blurRadius: 15, offset: const Offset(0, 5)),
               ],
             ),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
+            child: Row(
               children: [
-                const Row(
-                  children: [
-                    Icon(Icons.person_pin_outlined, color: Colors.white70, size: 20),
-                    SizedBox(width: 8),
-                    Text('اسم الموزع', style: TextStyle(color: Colors.white70, fontSize: 13, fontWeight: FontWeight.bold)),
-                  ],
-                ),
-                const SizedBox(height: 12),
-                TextField(
-                  controller: _nameCtrl,
-                  style: const TextStyle(color: Colors.white, fontSize: 16, fontWeight: FontWeight.bold),
-                  textAlign: TextAlign.right,
-                  decoration: InputDecoration(
-                    hintText: 'أدخل اسم الموزع...',
-                    hintStyle: const TextStyle(color: Colors.white38),
-                    filled: true,
-                    fillColor: Colors.white.withOpacity(0.12),
-                    contentPadding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
-                    border: OutlineInputBorder(
-                      borderRadius: BorderRadius.circular(10),
-                      borderSide: BorderSide.none,
-                    ),
-                    suffixIcon: _nameSaved
-                        ? const Icon(Icons.check_circle, color: Colors.greenAccent, size: 20)
-                        : null,
+                Container(
+                  width: 70,
+                  height: 70,
+                  decoration: BoxDecoration(
+                    color: Colors.white.withOpacity(0.2),
+                    shape: BoxShape.circle,
+                    border: Border.all(color: Colors.white.withOpacity(0.4), width: 2),
                   ),
-                  onSubmitted: (_) => _saveName(),
+                  child: const Icon(Icons.person_rounded, color: Colors.white, size: 40),
                 ),
-                const SizedBox(height: 12),
-                SizedBox(
-                  width: double.infinity,
-                  child: ElevatedButton(
-                    onPressed: _saveName,
-                    style: ElevatedButton.styleFrom(
-                      backgroundColor: Colors.white,
-                      foregroundColor: AppTheme.primary,
-                      padding: const EdgeInsets.symmetric(vertical: 10),
-                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
-                      elevation: 0,
-                    ),
-                    child: const Text('حفظ الاسم', style: TextStyle(fontWeight: FontWeight.bold)),
+                const SizedBox(width: 16),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Row(
+                        children: [
+                          Expanded(
+                            child: Text(
+                              _nameCtrl.text.isEmpty ? 'اسم الموزع...' : _nameCtrl.text,
+                              style: const TextStyle(color: Colors.white, fontSize: 20, fontWeight: FontWeight.bold),
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                            ),
+                          ),
+                          GestureDetector(
+                            onTap: () => _showEditNameDialog(context),
+                            child: Container(
+                              padding: const EdgeInsets.all(6),
+                              decoration: BoxDecoration(
+                                color: Colors.white.withOpacity(0.15),
+                                shape: BoxShape.circle,
+                              ),
+                              child: const Icon(Icons.edit_rounded, color: Colors.white, size: 16),
+                            ),
+                          )
+                        ],
+                      ),
+                      const SizedBox(height: 4),
+                      Text(
+                        (FirebaseAuth.instance.currentUser?.phoneNumber?.isNotEmpty == true 
+                            ? FirebaseAuth.instance.currentUser!.phoneNumber! 
+                            : FirebaseAuth.instance.currentUser?.email?.replaceAll('@manager.roti.app', '')?.replaceAll('@roti.app', '')?.replaceAll('@roti.com', '')) ?? 'بدون رقم',
+                        style: const TextStyle(color: Colors.white70, fontSize: 14, letterSpacing: 1.2),
+                        textDirection: TextDirection.ltr,
+                      ),
+                    ],
                   ),
                 ),
               ],
@@ -377,11 +386,66 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
   }
 
   Future<void> _saveName() async {
-    await ref.read(distributorNameProvider.notifier).setName(_nameCtrl.text.trim());
+    final newName = _nameCtrl.text.trim();
+    if (newName.isEmpty) return;
+
+    // Save locally
+    await ref.read(distributorNameProvider.notifier).setName(newName);
+
+    // Save to Firestore to persist across logouts
+    final user = FirebaseAuth.instance.currentUser;
+    if (user != null) {
+      try {
+        await FirebaseFirestore.instance.collection('users').doc(user.uid).update({
+          'name': newName,
+        });
+      } catch (e) {
+        // Ignore network errors silently for settings sync
+      }
+    }
+
     setState(() => _nameSaved = true);
     Future.delayed(const Duration(seconds: 2), () {
       if (mounted) setState(() => _nameSaved = false);
     });
+  }
+
+  void _showEditNameDialog(BuildContext context) {
+    final tempCtrl = TextEditingController(text: _nameCtrl.text);
+    showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+        title: const Text('تعديل اسم الموزع', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 18)),
+        content: TextField(
+          controller: tempCtrl,
+          decoration: const InputDecoration(
+            hintText: 'أدخل الاسم الجديد...',
+            border: OutlineInputBorder(borderRadius: BorderRadius.all(Radius.circular(10))),
+          ),
+          autofocus: true,
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text('إلغاء', style: TextStyle(color: AppTheme.textSecondary)),
+          ),
+          ElevatedButton(
+            style: ElevatedButton.styleFrom(backgroundColor: AppTheme.primary, foregroundColor: Colors.white),
+            onPressed: () {
+              if (tempCtrl.text.trim().isNotEmpty) {
+                setState(() {
+                  _nameCtrl.text = tempCtrl.text.trim();
+                });
+                _saveName();
+                Navigator.pop(ctx);
+              }
+            },
+            child: const Text('حفظ'),
+          ),
+        ],
+      ),
+    );
   }
 
   Widget _sectionHeader(String title) {
@@ -483,12 +547,12 @@ class ProductsManagementScreen extends ConsumerWidget {
                         crossAxisAlignment: CrossAxisAlignment.start,
                         children: [
                           Text(p.name, style: const TextStyle(color: AppTheme.textPrimary, fontWeight: FontWeight.bold, fontSize: 15)),
-                          Text(
-                            'السعر: ${p.defaultPrice}  |  ${p.unitName != null && p.unitName!.isNotEmpty ? "الوحدة: ${p.unitName} (${p.itemsPerUnit ?? "-"} حبة)" : "بدون وحدة كبيرة"}',
-                            style: const TextStyle(color: AppTheme.textSecondary, fontSize: 12),
-                          ),
                         ],
                       ),
+                    ),
+                    IconButton(
+                      icon: const Icon(Icons.edit_outlined, color: AppTheme.primary),
+                      onPressed: () => _showEditDialog(context, ref, p),
                     ),
                     IconButton(
                       icon: const Icon(Icons.delete_outline, color: AppTheme.danger),
@@ -512,9 +576,6 @@ class ProductsManagementScreen extends ConsumerWidget {
 
   void _showAddDialog(BuildContext context, WidgetRef ref) {
     final nameCtrl = TextEditingController();
-    final priceCtrl = TextEditingController();
-    final unitCtrl = TextEditingController();
-    final countCtrl = TextEditingController();
 
     showModalBottomSheet(
       context: context,
@@ -531,32 +592,70 @@ class ProductsManagementScreen extends ConsumerWidget {
               const Text('إضافة صنف جديد', style: TextStyle(color: AppTheme.textPrimary, fontSize: 18, fontWeight: FontWeight.bold)),
               const SizedBox(height: 16),
               _inputField(nameCtrl, 'اسم الصنف *', 'مثال: روتي'),
-              const SizedBox(height: 10),
-              _inputField(priceCtrl, 'السعر الافتراضي *', 'مثال: 0.5', TextInputType.number),
-              const SizedBox(height: 10),
-              _inputField(unitCtrl, 'اسم الوحدة الكبيرة (اختياري)', 'مثال: شدة'),
-              const SizedBox(height: 10),
-              _inputField(countCtrl, 'عدد الحبات في الوحدة', 'مثال: 10', TextInputType.number),
               const SizedBox(height: 20),
               SizedBox(
                 width: double.infinity,
                 child: ElevatedButton(
                   onPressed: () async {
-                    if (nameCtrl.text.isEmpty || priceCtrl.text.isEmpty) {
+                    if (nameCtrl.text.isEmpty) {
                       ScaffoldMessenger.of(context).showSnackBar(
-                        const SnackBar(content: Text('الاسم والسعر مطلوبان')));
+                        const SnackBar(content: Text('الاسم مطلوب')));
                       return;
                     }
                     await ref.read(productsProvider.notifier).addProduct(Product(
                       name: nameCtrl.text.trim(),
-                      defaultPrice: AppUtils.tryParseDouble(priceCtrl.text) ?? 0,
-                      unitName: unitCtrl.text.trim().isEmpty ? null : unitCtrl.text.trim(),
-                      itemsPerUnit: AppUtils.tryParseInt(countCtrl.text),
+                      defaultPrice: 0,
                       createdAt: DateTime.now().toIso8601String(),
                     ));
                     Navigator.pop(ctx);
                   },
                   child: const Text('حفظ'),
+                ),
+              ),
+            ],
+          ),
+        );
+      },
+    );
+  }
+
+  void _showEditDialog(BuildContext context, WidgetRef ref, Product product) {
+    final nameCtrl = TextEditingController(text: product.name);
+
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: AppTheme.cardBackground,
+      isScrollControlled: true,
+      shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(20))),
+      builder: (ctx) {
+        return Padding(
+          padding: EdgeInsets.fromLTRB(20, 20, 20, MediaQuery.of(ctx).viewInsets.bottom + 20),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              const Text('تعديل الصنف', style: TextStyle(color: AppTheme.textPrimary, fontSize: 18, fontWeight: FontWeight.bold)),
+              const SizedBox(height: 16),
+              _inputField(nameCtrl, 'اسم الصنف *', 'مثال: روتي'),
+              const SizedBox(height: 20),
+              SizedBox(
+                width: double.infinity,
+                child: ElevatedButton(
+                  onPressed: () async {
+                    if (nameCtrl.text.isEmpty) {
+                      ScaffoldMessenger.of(context).showSnackBar(
+                        const SnackBar(content: Text('الاسم مطلوب')));
+                      return;
+                    }
+                    final updated = product.copyWith(
+                      name: nameCtrl.text.trim(),
+                      updatedAt: DateTime.now().toIso8601String(),
+                      syncStatus: 'pending',
+                    );
+                    await ref.read(productsProvider.notifier).updateProduct(updated);
+                    if (context.mounted) Navigator.pop(ctx);
+                  },
+                  child: const Text('حفظ التعديل'),
                 ),
               ),
             ],

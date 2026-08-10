@@ -15,20 +15,23 @@ class SupplierRepository {
     if (wd.first['is_closed'] == 1) throw Exception('لا يمكن إجراء عملية في يوم مغلق');
   }
 
-  Future<void> _checkInventoryForNegativeOp(Transaction txn, String workDayId, String productId, double newQty, {double oldQty = 0}) async {
-    var loads = await txn.rawQuery('SELECT SUM(initial_quantity) as total FROM inventory_loads WHERE work_day_id = ? AND product_id = ? AND is_deleted = 0', [workDayId, productId]);
+  Future<void> _checkInventoryForNegativeOp(Transaction txn, String workDayId, String supplierId, String productId, double newQty, {double oldQty = 0}) async {
+    List<Object> args = [workDayId, productId, supplierId];
+    String suppFilter = ' AND supplier_id = ?';
+
+    var loads = await txn.rawQuery('SELECT SUM(initial_quantity) as total FROM inventory_loads WHERE work_day_id = ? AND product_id = ? AND is_deleted = 0$suppFilter', args);
     double loaded = (loads.first['total'] as num?)?.toDouble() ?? 0.0;
 
-    var dists = await txn.rawQuery('SELECT SUM(quantity) as total FROM distributions WHERE work_day_id = ? AND product_id = ? AND is_deleted = 0', [workDayId, productId]);
+    var dists = await txn.rawQuery('SELECT SUM(quantity) as total FROM distributions WHERE work_day_id = ? AND product_id = ? AND is_deleted = 0$suppFilter', args);
     double distributed = (dists.first['total'] as num?)?.toDouble() ?? 0.0;
 
-    var rets = await txn.rawQuery('SELECT SUM(quantity) as total FROM returns WHERE work_day_id = ? AND product_id = ? AND is_deleted = 0', [workDayId, productId]);
+    var rets = await txn.rawQuery('SELECT SUM(quantity) as total FROM returns WHERE work_day_id = ? AND product_id = ? AND is_deleted = 0$suppFilter', args);
     double returned = (rets.first['total'] as num?)?.toDouble() ?? 0.0;
 
-    var srets = await txn.rawQuery('SELECT SUM(quantity) as total FROM supplier_returns WHERE work_day_id = ? AND product_id = ? AND is_deleted = 0', [workDayId, productId]);
+    var srets = await txn.rawQuery('SELECT SUM(quantity) as total FROM supplier_returns WHERE work_day_id = ? AND product_id = ? AND is_deleted = 0$suppFilter', args);
     double supplierReturned = (srets.first['total'] as num?)?.toDouble() ?? 0.0;
 
-    var damages = await txn.rawQuery('SELECT SUM(quantity) as total FROM damaged_items WHERE work_day_id = ? AND product_id = ? AND is_deleted = 0', [workDayId, productId]);
+    var damages = await txn.rawQuery('SELECT SUM(quantity) as total FROM damaged_items WHERE work_day_id = ? AND product_id = ? AND is_deleted = 0$suppFilter', args);
     double damaged = (damages.first['total'] as num?)?.toDouble() ?? 0.0;
 
     double currentAvailable = loaded + returned - distributed - supplierReturned - damaged;
@@ -109,13 +112,13 @@ class SupplierRepository {
   }
 
   // --- Supplier Returns ---
-  Future<int> insertSupplierReturn(SupplierReturn sr) async {
-    if ((sr.quantity ?? 0) < 0) throw Exception('لا يمكن إدخال كمية سالبة');
+  Future<int> insertSupplierReturn(SupplierReturn sReturn) async {
+    if ((sReturn.quantity ?? 0) < 0) throw Exception('لا يمكن إدخال كمية سالبة');
     Database db = await _dbHelper.database;
     return await db.transaction((txn) async {
-      await _checkWorkDayOpen(txn, sr.workDayId);
-      await _checkInventoryForNegativeOp(txn, sr.workDayId, sr.productId, (sr.quantity ?? 0).toDouble());
-      final map = sr.toMap();
+      await _checkWorkDayOpen(txn, sReturn.workDayId);
+      await _checkInventoryForNegativeOp(txn, sReturn.workDayId, sReturn.supplierId, sReturn.productId, (sReturn.quantity ?? 0).toDouble());
+      final map = sReturn.toMap();
       final String id = (map['id'] == null || map['id'].toString().isEmpty) ? const Uuid().v4() : map['id'];
       map['id'] = id;
     map['updated_at'] = map['updated_at'] ?? DateTime.now().toUtc().toIso8601String();
@@ -135,11 +138,11 @@ class SupplierRepository {
 
   // --- Damaged Items ---
   Future<int> insertDamagedItem(DamagedItem di) async {
-    if ((di.quantity ?? 0) < 0) throw Exception('لا يمكن إدخال كمية سالبة');
+    if (di.quantity < 0) throw Exception('لا يمكن إدخال كمية سالبة');
     Database db = await _dbHelper.database;
     return await db.transaction((txn) async {
       await _checkWorkDayOpen(txn, di.workDayId);
-      await _checkInventoryForNegativeOp(txn, di.workDayId, di.productId, (di.quantity ?? 0).toDouble());
+      await _checkInventoryForNegativeOp(txn, di.workDayId, di.supplierId, di.productId, di.quantity.toDouble());
       final map = di.toMap();
       final String id = (map['id'] == null || map['id'].toString().isEmpty) ? const Uuid().v4() : map['id'];
       map['id'] = id;

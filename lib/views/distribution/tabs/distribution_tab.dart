@@ -48,6 +48,8 @@ class _DistributionTabState extends ConsumerState<DistributionTab> {
   List<CustomerPrice> _customerPrices = [];
   Map<String, String> _productNames = {};
   bool _loading = true;
+  // Remembers the last bakery the user selected across form openings
+  String? _lastSelectedSupplierId;
 
   String? get _effectiveWorkDayId => widget.workDayId ?? ref.read(currentWorkDayProvider).value?.id;
 
@@ -204,19 +206,32 @@ class _DistributionTabState extends ConsumerState<DistributionTab> {
       supplierRemaining[key] = (supplierRemaining[key] ?? 0) + (existingDist.quantity as num).toInt();
     }
 
-    // Unique supplier IDs from loads
+    // Unique supplier IDs from loads — fetch names first, then sort alphabetically
+    // so the order is always deterministic and consistent across form openings.
     final supplierIds = loads.map((l) => l.supplierId).toSet().toList();
     final supplierNames = await fetchSupplierNamesByIds(supplierIds);
+    supplierIds.sort((a, b) =>
+        (supplierNames[a] ?? a).compareTo(supplierNames[b] ?? b));
 
     final isEdit = existingDist != null;
 
-    // Default supplier
-    String selectedSupplierId = (isEdit &&
+    // Default supplier:
+    // - For edit: use the supplierId stored on the record.
+    // - For new: prefer the last bakery the user worked with (_lastSelectedSupplierId),
+    //   falling back to the first in the sorted list.
+    String selectedSupplierId;
+    if (isEdit &&
         existingDist.supplierId.isNotEmpty &&
         existingDist.supplierId != 'unknown' &&
-        supplierIds.contains(existingDist.supplierId))
-        ? existingDist.supplierId
-        : supplierIds.first;
+        supplierIds.contains(existingDist.supplierId)) {
+      selectedSupplierId = existingDist.supplierId;
+    } else if (!isEdit &&
+        _lastSelectedSupplierId != null &&
+        supplierIds.contains(_lastSelectedSupplierId)) {
+      selectedSupplierId = _lastSelectedSupplierId!;
+    } else {
+      selectedSupplierId = supplierIds.first;
+    }
 
     Product? selected;
     final qtyCtrl = TextEditingController(text: isEdit ? existingDist.quantity.toString() : '');
@@ -237,6 +252,8 @@ class _DistributionTabState extends ConsumerState<DistributionTab> {
     }
 
     if (!mounted) return;
+
+    bool isSaving = false;
 
     showModalBottomSheet(
       context: context,
@@ -314,7 +331,11 @@ class _DistributionTabState extends ConsumerState<DistributionTab> {
                       children: supplierIds.map((sId) {
                         final isActive = selectedSupplierId == sId;
                         return GestureDetector(
-                          onTap: () => setS(() { selectedSupplierId = sId; selected = null; }),
+                          onTap: () => setS(() {
+                            selectedSupplierId = sId;
+                            _lastSelectedSupplierId = sId;
+                            selected = null;
+                          }),
                           child: AnimatedContainer(
                             duration: const Duration(milliseconds: 200),
                             margin: const EdgeInsets.only(left: 8),
@@ -416,7 +437,7 @@ class _DistributionTabState extends ConsumerState<DistributionTab> {
                 SizedBox(
                   width: double.infinity,
                   child: ElevatedButton(
-                    onPressed: () async {
+                    onPressed: isSaving ? null : () async {
                       if (selected == null) {
                         _showErrorDialog(ctx, 'الرجاء اختيار صنف');
                         return;
@@ -428,6 +449,7 @@ class _DistributionTabState extends ConsumerState<DistributionTab> {
                         return;
                       }
 
+                      setS(() => isSaving = true);
                       try {
                         if (isEdit) {
                           await ref.read(_txRepoProvider).updateDistribution(Distribution(
@@ -451,9 +473,12 @@ class _DistributionTabState extends ConsumerState<DistributionTab> {
                             createdAt: DateTime.now().toIso8601String(),
                           ));
                         }
+                        // Remember which bakery was used for the next form opening
+                        _lastSelectedSupplierId = selectedSupplierId;
                         Navigator.pop(ctx);
                         _loadData(); _invalidateProviders();
                       } catch (e) {
+                        setS(() => isSaving = false);
                         String msg = e.toString();
                         if (msg.startsWith('Exception: ')) msg = msg.substring(11);
                         _showErrorDialog(ctx, msg);

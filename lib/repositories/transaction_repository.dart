@@ -97,6 +97,24 @@ class TransactionRepository {
     }
   }
 
+  Future<void> _checkDistributionValidAgainstReturns(Transaction txn, String workDayId, String customerId, String productId, double newDistQty, {double oldDistQty = 0, String? supplierId}) async {
+    String suppFilter = supplierId != null ? ' AND supplier_id = ?' : '';
+    List<Object> args = supplierId != null ? [workDayId, customerId, productId, supplierId] : [workDayId, customerId, productId];
+
+    var dists = await txn.rawQuery('SELECT SUM(quantity) as total FROM distributions WHERE work_day_id = ? AND customer_id = ? AND product_id = ? AND is_deleted = 0$suppFilter', args);
+    double distributed = (dists.first['total'] as num?)?.toDouble() ?? 0.0;
+
+    var rets = await txn.rawQuery('SELECT SUM(quantity) as total FROM returns WHERE work_day_id = ? AND customer_id = ? AND product_id = ? AND is_deleted = 0$suppFilter', args);
+    double returned = (rets.first['total'] as num?)?.toDouble() ?? 0.0;
+
+    double distributedIfOldRemoved = distributed - oldDistQty;
+    double projectedDistributed = distributedIfOldRemoved + newDistQty;
+
+    if (projectedDistributed < returned) {
+      throw Exception('لا يمكن تعديل أو حذف التوزيع: المرتجع المسجل (${returned.toInt()}) سيكون أكبر من التوزيع المتبقي (${projectedDistributed.toInt()})');
+    }
+  }
+
 
   Future<int> insertDistribution(Distribution distribution) async {
     if ((distribution.quantity ?? 0) < 0) throw Exception('لا يمكن إدخال كمية سالبة');
@@ -130,6 +148,9 @@ class TransactionRepository {
       map['updated_at'] = DateTime.now().toIso8601String();
       map['sync_status'] = 'pending';
       var old = await txn.query('distributions', where: 'id = ?', whereArgs: [distribution.id]);
+      if (old.isNotEmpty) {
+        await _checkWorkDayOpen(txn, old.first['work_day_id'] as String);
+      }
       await _checkWorkDayOpen(txn, distribution.workDayId);
       
       double oldQty = 0.0;
@@ -142,11 +163,11 @@ class TransactionRepository {
 
       if (oldProductId != null && oldProductId == distribution.productId) {
         await _checkInventoryForNegativeOp(txn, distribution.workDayId, distribution.productId, (distribution.quantity ?? 0).toDouble(), oldQty: oldQty, supplierId: distribution.supplierId);
+        await _checkDistributionValidAgainstReturns(txn, distribution.workDayId, distribution.customerId, distribution.productId, (distribution.quantity ?? 0).toDouble(), oldDistQty: oldQty, supplierId: distribution.supplierId);
       } else {
         await _checkInventoryForNegativeOp(txn, distribution.workDayId, distribution.productId, (distribution.quantity ?? 0).toDouble(), oldQty: 0.0, supplierId: distribution.supplierId);
         if (oldProductId != null) {
-          // Note: using the new supplierId for the old product check might be slightly inaccurate if supplier changed, but it's acceptable for this simple case. Ideally we should read old supplier_id.
-          await _checkInventoryForPositiveOp(txn, distribution.workDayId, oldProductId, 0.0, oldQty: oldQty, supplierId: distribution.supplierId);
+          await _checkDistributionValidAgainstReturns(txn, distribution.workDayId, distribution.customerId, oldProductId, 0.0, oldDistQty: oldQty, supplierId: distribution.supplierId);
         }
       }
       if (old.isNotEmpty) {
@@ -166,7 +187,7 @@ class TransactionRepository {
       var old = await txn.query('distributions', where: 'id = ?', whereArgs: [id]);
       if (old.isNotEmpty && old.first['is_deleted'] == 0) {
         await _checkWorkDayOpen(txn, old.first['work_day_id'] as String);
-        await _checkInventoryForPositiveOp(txn, old.first['work_day_id'] as String, old.first['product_id'] as String, 0.0, oldQty: (old.first['quantity'] as num).toDouble());
+        await _checkDistributionValidAgainstReturns(txn, old.first['work_day_id'] as String, old.first['customer_id'] as String, old.first['product_id'] as String, 0.0, oldDistQty: (old.first['quantity'] as num).toDouble(), supplierId: old.first['supplier_id'] as String?);
         double val = ((old.first['quantity'] as num) * (old.first['price'] as num)).toDouble();
         await txn.rawUpdate('UPDATE customers SET current_balance = current_balance - ? WHERE id = ?', [val, old.first['customer_id']]);
       }
@@ -210,6 +231,9 @@ class TransactionRepository {
       map['updated_at'] = DateTime.now().toIso8601String();
       map['sync_status'] = 'pending';
       var old = await txn.query('returns', where: 'id = ?', whereArgs: [returnTx.id]);
+      if (old.isNotEmpty) {
+        await _checkWorkDayOpen(txn, old.first['work_day_id'] as String);
+      }
       await _checkWorkDayOpen(txn, returnTx.workDayId);
       
       double oldQty = 0.0;
@@ -249,7 +273,7 @@ class TransactionRepository {
       var old = await txn.query('returns', where: 'id = ?', whereArgs: [id]);
       if (old.isNotEmpty && old.first['is_deleted'] == 0) {
         await _checkWorkDayOpen(txn, old.first['work_day_id'] as String);
-        await _checkInventoryForPositiveOp(txn, old.first['work_day_id'] as String, old.first['product_id'] as String, 0.0, oldQty: (old.first['quantity'] as num).toDouble());
+        await _checkInventoryForPositiveOp(txn, old.first['work_day_id'] as String, old.first['product_id'] as String, 0.0, oldQty: (old.first['quantity'] as num).toDouble(), supplierId: old.first['supplier_id'] as String?);
         double val = ((old.first['quantity'] as num) * (old.first['price'] as num)).toDouble();
         await txn.rawUpdate('UPDATE customers SET current_balance = current_balance + ? WHERE id = ?', [val, old.first['customer_id']]);
       }
@@ -263,6 +287,7 @@ class TransactionRepository {
     if (collectionTx.amount < 0) throw Exception('لا يمكن أن يكون المبلغ سالباً');
     Database db = await _dbHelper.database;
     return await db.transaction((txn) async {
+      await _checkWorkDayOpen(txn, collectionTx.workDayId);
       final map = collectionTx.toMap();
       map['id'] = map['id'] ?? const Uuid().v4();
       map['updated_at'] = map['updated_at'] ?? DateTime.now().toIso8601String();
@@ -281,10 +306,14 @@ class TransactionRepository {
     if (collectionTx.amount < 0) throw Exception('لا يمكن أن يكون المبلغ سالباً');
     Database db = await _dbHelper.database;
     return await db.transaction((txn) async {
+      var old = await txn.query('collections', where: 'id = ?', whereArgs: [collectionTx.id]);
+      if (old.isNotEmpty) {
+        await _checkWorkDayOpen(txn, old.first['work_day_id'] as String);
+      }
+      await _checkWorkDayOpen(txn, collectionTx.workDayId);
       final map = collectionTx.toMap();
       map['updated_at'] = DateTime.now().toIso8601String();
       map['sync_status'] = 'pending';
-      var old = await txn.query('collections', where: 'id = ?', whereArgs: [collectionTx.id]);
       if (old.isNotEmpty) {
         double oldVal = (old.first['amount'] as num).toDouble();
         double newVal = collectionTx.amount;
@@ -301,6 +330,7 @@ class TransactionRepository {
     return await db.transaction((txn) async {
       var old = await txn.query('collections', where: 'id = ?', whereArgs: [id]);
       if (old.isNotEmpty && old.first['is_deleted'] == 0) {
+        await _checkWorkDayOpen(txn, old.first['work_day_id'] as String);
         double val = (old.first['amount'] as num).toDouble();
         await txn.rawUpdate('UPDATE customers SET current_balance = current_balance + ? WHERE id = ?', [val, old.first['customer_id']]);
       }
@@ -1115,215 +1145,112 @@ class TransactionRepository {
     if (wdRes.isEmpty) return [];
     final wdCreatedAt = wdRes.first['created_at'] as String;
 
-    // الخطة البديلة: البحث عن آخر سعر تكلفة تاريخي (قبل أو خلال هذا اليوم المالي)
+    // 1. Get Cost Prices per Supplier and Product
+    // First, from inventory_loads for this day
+    final loads = await db.rawQuery('''
+      SELECT supplier_id, product_id, cost_price
+      FROM inventory_loads
+      WHERE work_day_id = ? AND is_deleted = 0
+    ''', [workDayId]);
+    
+    // Fallback 1: Latest historical load cost
     final fallbackCosts = await db.rawQuery('''
-      SELECT il.product_id, il.supplier_id, s.name as supplier_name, il.cost_price, p.name as product_name
+      SELECT il.supplier_id, il.product_id, il.cost_price
       FROM inventory_loads il
-      JOIN suppliers s ON il.supplier_id = s.id
-      JOIN products p ON il.product_id = p.id
       INNER JOIN (
-          SELECT product_id, MAX(created_at) as max_date
+          SELECT supplier_id, product_id, MAX(created_at) as max_date
           FROM inventory_loads
           WHERE created_at <= ? AND is_deleted = 0
-          GROUP BY product_id
-      ) latest ON il.product_id = latest.product_id AND il.created_at = latest.max_date
+          GROUP BY supplier_id, product_id
+      ) latest ON il.supplier_id = latest.supplier_id AND il.product_id = latest.product_id AND il.created_at = latest.max_date
       WHERE il.is_deleted = 0
     ''', [wdCreatedAt]);
     
-    final Map<String, Map<String, dynamic>> productFallback = {};
-    for (var fc in fallbackCosts) {
-      final pid = fc['product_id'] as String;
-      if (!productFallback.containsKey(pid)) {
-        productFallback[pid] = fc;
-      }
-    }
-
-    // الخطة البديلة الثانية: إذا لم يتم العثور على أي تاريخ تحميل، نلجأ للسعر الحالي
-    final currentCosts = await db.rawQuery('''
-      SELECT sp.product_id, sp.supplier_id, s.name as supplier_name, sp.cost_price, p.name as product_name
-      FROM supplier_products sp
-      JOIN suppliers s ON sp.supplier_id = s.id
-      JOIN products p ON sp.product_id = p.id
-      WHERE sp.is_deleted = 0
+    // Fallback 2: Current catalog cost
+    final catalogCosts = await db.rawQuery('''
+      SELECT supplier_id, product_id, cost_price
+      FROM supplier_products
+      WHERE is_deleted = 0
     ''');
+
+    final Map<String, double> costPrices = {};
     
-    for (var cc in currentCosts) {
-      final pid = cc['product_id'] as String;
-      if (!productFallback.containsKey(pid)) {
-        productFallback[pid] = cc;
-      }
+    // Helper to build key
+    String key(String sid, String pid) => '${sid}_${pid}';
+    
+    // Populate costs in reverse priority (catalog -> historical -> today's load)
+    for (var row in catalogCosts) {
+      costPrices[key(row['supplier_id'].toString(), row['product_id'].toString())] = (row['cost_price'] as num).toDouble();
     }
-
-    final loads = await db.rawQuery('''
-      SELECT il.supplier_id, s.name AS supplier_name, il.product_id, p.name AS product_name,
-             il.initial_quantity AS qty, il.cost_price, il.created_at
-      FROM inventory_loads il
-      JOIN suppliers s ON il.supplier_id = s.id
-      JOIN products p ON il.product_id = p.id
-      WHERE il.work_day_id = ? AND il.is_deleted = 0
-      ORDER BY il.product_id, il.created_at ASC
-    ''', [workDayId]);
-
-    final dists = await db.rawQuery('''
-      SELECT d.product_id, p.name AS product_name, SUM(d.quantity) AS dist_qty, SUM(d.quantity * d.price) AS dist_revenue
-      FROM distributions d 
-      JOIN products p ON d.product_id = p.id
-      WHERE d.work_day_id = ? AND d.is_deleted = 0
-      GROUP BY d.product_id, p.name
-    ''', [workDayId]);
-
-    final rets = await db.rawQuery('''
-      SELECT product_id, SUM(quantity) AS ret_qty
-      FROM returns WHERE work_day_id = ? AND is_deleted = 0
-      GROUP BY product_id
-    ''', [workDayId]);
-
-    final chargedDamaged = await db.rawQuery('''
-      SELECT product_id, SUM(quantity) AS damaged_qty
-      FROM damaged_items WHERE work_day_id = ? AND is_deleted = 0 AND is_charged_to_distributor = 1
-      GROUP BY product_id
-    ''', [workDayId]);
-
-    final Map<String, double> distQtyMap = {};
-    final Map<String, double> distRevenueMap = {};
-    final Map<String, String> distNameMap = {};
-    for (var d in dists) {
-      final pid = d['product_id'] as String;
-      distQtyMap[pid] = (d['dist_qty'] as num).toDouble();
-      distRevenueMap[pid] = (d['dist_revenue'] as num).toDouble();
-      distNameMap[pid] = d['product_name'] as String;
+    for (var row in fallbackCosts) {
+      costPrices[key(row['supplier_id'].toString(), row['product_id'].toString())] = (row['cost_price'] as num).toDouble();
     }
-
-    final Map<String, double> retQtyMap = {};
-    for (var r in rets) {
-      final pid = r['product_id'] as String;
-      retQtyMap[pid] = (r['ret_qty'] as num).toDouble();
+    for (var row in loads) {
+      costPrices[key(row['supplier_id'].toString(), row['product_id'].toString())] = (row['cost_price'] as num).toDouble();
     }
+    // 2. Get Net Quantities and Revenue per Supplier and Product
+    // We union Distributions (+), Returns (-), and Charged Damaged (+)
+    final netRows = await db.rawQuery('''
+      SELECT supplier_id, s.name as supplier_name, product_id, p.name as product_name, 
+             SUM(net_qty) as total_net_qty,
+             SUM(net_rev) as total_net_rev
+      FROM (
+        SELECT supplier_id, product_id, quantity as net_qty, (quantity * price) as net_rev 
+        FROM distributions WHERE work_day_id = ? AND is_deleted = 0
+        UNION ALL
+        SELECT supplier_id, product_id, -quantity as net_qty, -(quantity * price) as net_rev 
+        FROM returns WHERE work_day_id = ? AND is_deleted = 0
+        UNION ALL
+        SELECT supplier_id, product_id, quantity as net_qty, 0 as net_rev 
+        FROM damaged_items WHERE work_day_id = ? AND is_deleted = 0 AND is_charged_to_distributor = 1
+      ) combined
+      JOIN suppliers s ON combined.supplier_id = s.id
+      JOIN products p ON combined.product_id = p.id
+      GROUP BY supplier_id, s.name, product_id, p.name
+    ''', [workDayId, workDayId, workDayId]);
 
-    final Map<String, double> chargedDamagedQtyMap = {};
-    for (var di in chargedDamaged) {
-      final pid = di['product_id'] as String;
-      chargedDamagedQtyMap[pid] = (di['damaged_qty'] as num).toDouble();
-    }
-
-    final Map<String, List<Map<String, dynamic>>> loadsByProduct = {};
-    for (var l in loads) {
-      final pid = l['product_id'] as String;
-      loadsByProduct.putIfAbsent(pid, () => []);
-      loadsByProduct[pid]!.add(l);
-    }
-
-    final Set<String> activeProductIds = {};
-    activeProductIds.addAll(distQtyMap.keys);
-    activeProductIds.addAll(retQtyMap.keys);
-    activeProductIds.addAll(chargedDamagedQtyMap.keys);
-    activeProductIds.addAll(loadsByProduct.keys);
-
+    // 3. Build Supplier Results
     final Map<String, Map<String, dynamic>> supplierResults = {};
 
-    for (final productId in activeProductIds) {
-      final totalDistQty = distQtyMap[productId] ?? 0;
-      final totalRetQty = retQtyMap[productId] ?? 0;
-      final totalChargedDamagedQty = chargedDamagedQtyMap[productId] ?? 0;
+    for (var row in netRows) {
+      final sId = row['supplier_id'].toString();
+      final sName = row['supplier_name'].toString();
+      final pId = row['product_id'].toString();
+      final pName = row['product_name'].toString();
+      final netQty = (row['total_net_qty'] as num).toDouble();
+      final netRev = (row['total_net_rev'] as num).toDouble();
       
-      final netSalesQty = totalDistQty - totalRetQty + totalChargedDamagedQty;
-      final totalRevenue = distRevenueMap[productId] ?? 0;
+      if (netQty <= 0) continue; // Skip zero or negative net distributions
       
-      final avgSellPrice = totalDistQty > 0 ? totalRevenue / totalDistQty : 0.0;
-
-      if (netSalesQty <= 0) continue;
-
-      double remaining = netSalesQty;
-      final productLoads = loadsByProduct[productId] ?? [];
-
-      for (final load in productLoads) {
-        if (remaining <= 0) break;
-
-        final supplierId = load['supplier_id'] as String;
-        final supplierName = load['supplier_name'] as String;
-        final productName = load['product_name'] as String;
-        final loadQty = (load['qty'] as num).toDouble();
-        double costPrice = (load['cost_price'] as num).toDouble();
-        
-        if (costPrice <= 0 && productFallback.containsKey(productId)) {
-          costPrice = (productFallback[productId]!['cost_price'] as num).toDouble();
-        }
-
-        final allocatedQty = remaining < loadQty ? remaining : loadQty;
-        final revenue = allocatedQty * avgSellPrice;
-        final cost = allocatedQty * costPrice;
-        final profit = revenue - cost;
-
-        remaining -= allocatedQty;
-
-        supplierResults.putIfAbsent(supplierId, () => {
-          'supplier_id': supplierId,
-          'supplier_name': supplierName,
-          'total_profit': 0.0,
-          'total_revenue': 0.0,
+      final costPrice = costPrices[key(sId, pId)] ?? 0.0;
+      final itemTotalCost = netQty * costPrice;
+      final avgSellPrice = netRev / netQty;
+      final itemProfit = netRev - itemTotalCost;
+      
+      if (!supplierResults.containsKey(sId)) {
+        supplierResults[sId] = {
+          'supplier_id': sId,
+          'supplier_name': sName,
           'total_cost': 0.0,
-          'products': <Map<String, dynamic>>[],
-        });
-
-        supplierResults[supplierId]!['total_profit'] += profit;
-        supplierResults[supplierId]!['total_revenue'] += revenue;
-        supplierResults[supplierId]!['total_cost'] += cost;
-        (supplierResults[supplierId]!['products'] as List).add({
-          'product_name': productName,
-          'qty': allocatedQty,
-          'revenue': revenue,
-          'cost': cost,
-          'profit': profit,
-          'avg_sell_price': avgSellPrice,
-          'cost_price': costPrice,
-          'allocated_qty': allocatedQty,
-        });
-      }
-
-      if (remaining > 0) {
-        String supplierId = 'unknown';
-        String supplierName = 'غير محدد';
-        String productName = distNameMap[productId] ?? 'صنف غير معروف';
-        double costPrice = 0.0;
-
-        if (productFallback.containsKey(productId)) {
-          final fb = productFallback[productId]!;
-          supplierId = fb['supplier_id'] as String;
-          supplierName = fb['supplier_name'] as String;
-          productName = fb['product_name'] as String;
-          costPrice = (fb['cost_price'] as num).toDouble();
-        }
-
-        final revenue = remaining * avgSellPrice;
-        final cost = remaining * costPrice;
-        final profit = revenue - cost;
-
-        supplierResults.putIfAbsent(supplierId, () => {
-          'supplier_id': supplierId,
-          'supplier_name': supplierName,
-          'total_profit': 0.0,
           'total_revenue': 0.0,
-          'total_cost': 0.0,
+          'total_profit': 0.0,
           'products': <Map<String, dynamic>>[],
-        });
-
-        supplierResults[supplierId]!['total_profit'] += profit;
-        supplierResults[supplierId]!['total_revenue'] += revenue;
-        supplierResults[supplierId]!['total_cost'] += cost;
-        (supplierResults[supplierId]!['products'] as List).add({
-          'product_name': productName,
-          'qty': remaining,
-          'revenue': revenue,
-          'cost': cost,
-          'profit': profit,
-          'avg_sell_price': avgSellPrice,
-          'cost_price': costPrice,
-          'allocated_qty': remaining,
-        });
-        
-        remaining = 0;
+        };
       }
+      
+      supplierResults[sId]!['products'].add({
+        'product_name': pName,
+        'allocated_qty': netQty,
+        'cost_price': costPrice,
+        'avg_sell_price': avgSellPrice,
+        'profit': itemProfit,
+      });
+      
+      supplierResults[sId]!['total_cost'] += itemTotalCost;
+      supplierResults[sId]!['total_revenue'] += netRev;
+      supplierResults[sId]!['total_profit'] += itemProfit;
     }
+
     return supplierResults.values.toList();
   }
 

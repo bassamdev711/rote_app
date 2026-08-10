@@ -43,6 +43,8 @@ class _ReturnTabState extends ConsumerState<ReturnTab> {
   List<ReturnTransaction> _returns = [];
   Map<String, String> _productNames = {};
   bool _loading = true;
+  // Remembers the last bakery the user selected across form openings
+  String? _lastSelectedSupplierId;
 
   String? get _effectiveWorkDayId => widget.workDayId ?? ref.read(currentWorkDayProvider).value?.id;
 
@@ -56,9 +58,9 @@ class _ReturnTabState extends ConsumerState<ReturnTab> {
     final wdId = _effectiveWorkDayId;
     if (wdId == null) { setState(() => _loading = false); return; }
     final data = await ref.read(_retTxRepoProvider).getReturnsByCustomer(widget.customer.id!, workDayId: wdId);
-    final productsAsync = ref.read(productsProvider);
+    final products = await ref.read(productsProvider.future);
     final Map<String, String> names = {};
-    productsAsync.whenData((ps) { for (var p in ps) { if (p.id != null) names[p.id!] = p.name; } });
+    for (var p in products) { if (p.id != null) names[p.id!] = p.name; }
     if (mounted) setState(() { _returns = data; _productNames = names; _loading = false; });
   }
 
@@ -191,19 +193,32 @@ class _ReturnTabState extends ConsumerState<ReturnTab> {
       supplierRemaining[key] = (supplierRemaining[key] ?? 0) - (sr.quantity as num).toInt();
     }
 
-    // Unique supplier IDs that were loaded today
+    // Unique supplier IDs that were loaded today — fetch names first, then sort
+    // alphabetically so the order is always deterministic and consistent.
     final supplierIds = loads.map((l) => l.supplierId).toSet().toList();
     final supplierNames = await _fetchSupplierNames(supplierIds);
+    supplierIds.sort((a, b) =>
+        (supplierNames[a] ?? a).compareTo(supplierNames[b] ?? b));
 
     final isEdit = existingReturn != null;
 
-    // Default supplier: for edit use stored supplierId, for new use first
-    String selectedSupplierId = (isEdit &&
+    // Default supplier:
+    // - For edit: use the supplierId stored on the record.
+    // - For new: prefer the last bakery the user worked with (_lastSelectedSupplierId),
+    //   falling back to the first in the sorted list.
+    String selectedSupplierId;
+    if (isEdit &&
         existingReturn.supplierId.isNotEmpty &&
         existingReturn.supplierId != 'unknown' &&
-        supplierIds.contains(existingReturn.supplierId))
-        ? existingReturn.supplierId
-        : supplierIds.first;
+        supplierIds.contains(existingReturn.supplierId)) {
+      selectedSupplierId = existingReturn.supplierId;
+    } else if (!isEdit &&
+        _lastSelectedSupplierId != null &&
+        supplierIds.contains(_lastSelectedSupplierId)) {
+      selectedSupplierId = _lastSelectedSupplierId!;
+    } else {
+      selectedSupplierId = supplierIds.first;
+    }
 
     Product? selected;
     final qtyCtrl = TextEditingController(text: isEdit ? existingReturn.quantity.toString() : '');
@@ -218,6 +233,8 @@ class _ReturnTabState extends ConsumerState<ReturnTab> {
     }
 
     if (!mounted) return;
+
+    bool isSaving = false;
 
     showModalBottomSheet(
       context: context,
@@ -296,7 +313,11 @@ class _ReturnTabState extends ConsumerState<ReturnTab> {
                       children: supplierIds.map((sId) {
                         final isActive = selectedSupplierId == sId;
                         return GestureDetector(
-                          onTap: () => setS(() { selectedSupplierId = sId; selected = null; }),
+                          onTap: () => setS(() {
+                            selectedSupplierId = sId;
+                            _lastSelectedSupplierId = sId;
+                            selected = null;
+                          }),
                           child: AnimatedContainer(
                             duration: const Duration(milliseconds: 200),
                             margin: const EdgeInsets.only(left: 8),
@@ -395,7 +416,7 @@ class _ReturnTabState extends ConsumerState<ReturnTab> {
                   width: double.infinity,
                   child: ElevatedButton(
                     style: ElevatedButton.styleFrom(backgroundColor: AppTheme.warning),
-                    onPressed: () async {
+                    onPressed: isSaving ? null : () async {
                       if (selected == null) {
                         _showErrorDialog(ctx, 'الرجاء اختيار صنف');
                         return;
@@ -407,6 +428,7 @@ class _ReturnTabState extends ConsumerState<ReturnTab> {
                         return;
                       }
 
+                      setS(() => isSaving = true);
                       try {
                         if (isEdit) {
                           await ref.read(_retTxRepoProvider).updateReturn(ReturnTransaction(
@@ -430,9 +452,12 @@ class _ReturnTabState extends ConsumerState<ReturnTab> {
                             createdAt: DateTime.now().toIso8601String(),
                           ));
                         }
+                        // Remember which bakery was used for the next form opening
+                        _lastSelectedSupplierId = selectedSupplierId;
                         Navigator.pop(ctx);
                         _loadData(); _invalidateProviders();
                       } catch (e) {
+                        setS(() => isSaving = false);
                         String msg = e.toString();
                         if (msg.startsWith('Exception: ')) msg = msg.substring(11);
                         _showErrorDialog(ctx, msg);

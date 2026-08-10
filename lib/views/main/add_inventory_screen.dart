@@ -3,8 +3,6 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../models/inventory_load.dart';
 import '../../providers/supplier_provider.dart';
 import '../../providers/work_day_provider.dart';
-import '../../providers/daily_inventory_provider.dart';
-import '../../repositories/inventory_load_repository.dart';
 import '../../core/theme/app_theme.dart';
 import '../../core/utils/app_utils.dart';
 import '../../providers/global_refresh_provider.dart';
@@ -27,6 +25,182 @@ class _AddInventoryScreenState extends ConsumerState<AddInventoryScreen> {
     final repo = ref.read(inventoryLoadRepositoryProvider);
     final data = await repo.getLoadsWithProductName(workDayId);
     if (mounted) setState(() { _allLoads = data; _loadingHistory = false; });
+  }
+
+  // ─── تعديل كمية سجل حمولة ──────────────────────────────────────────────────
+  Future<void> _showEditLoadDialog(Map<String, dynamic> load, String workDayId) async {
+    final oldQty = load['initial_quantity'] is String
+        ? int.tryParse(load['initial_quantity'].toString()) ?? 0
+        : (load['initial_quantity'] as num?)?.toInt() ?? 0;
+    final qtyCtrl = TextEditingController(text: oldQty.toString());
+
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('تعديل الكمية'),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text('الكمية الحالية: $oldQty',
+                style: const TextStyle(color: AppTheme.textSecondary, fontSize: 13)),
+            const SizedBox(height: 12),
+            TextField(
+              controller: qtyCtrl,
+              autofocus: true,
+              keyboardType: TextInputType.number,
+              decoration: const InputDecoration(labelText: 'الكمية الجديدة'),
+            ),
+            const SizedBox(height: 8),
+            Container(
+              padding: const EdgeInsets.all(10),
+              decoration: BoxDecoration(
+                color: AppTheme.primary.withOpacity(0.07),
+                borderRadius: BorderRadius.circular(10),
+              ),
+              child: const Text(
+                'لا يمكن تخفيض الكمية إلى أقل مما تم توزيعه فعلاً',
+                style: TextStyle(color: AppTheme.primary, fontSize: 11),
+              ),
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(ctx, false),
+              child: const Text('إلغاء')),
+          ElevatedButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            child: const Text('تعديل'),
+          ),
+        ],
+      ),
+    );
+
+    if (confirmed != true) return;
+
+    final newQty = AppUtils.tryParseInt(qtyCtrl.text.trim()) ?? 0;
+    if (newQty <= 0) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('الرجاء إدخال كمية أكبر من صفر'),
+            backgroundColor: AppTheme.warning,
+          ),
+        );
+      }
+      return;
+    }
+    if (newQty == oldQty) return; // لا تغيير
+
+    try {
+      final repo = ref.read(inventoryLoadRepositoryProvider);
+      final updatedLoad = InventoryLoad(
+        id: load['id'] as String?,
+        workDayId: load['work_day_id'] as String,
+        productId: load['product_id'] as String,
+        supplierId: load['supplier_id'] as String,
+        initialQuantity: newQty,
+        costPrice: (load['cost_price'] as num?)?.toDouble() ?? 0.0,
+        createdAt: load['created_at'] as String,
+      );
+      await repo.update(updatedLoad);
+      ref.read(globalRefreshProvider.notifier).refresh();
+      await _loadHistory(workDayId);
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('تم تعديل الكمية من $oldQty إلى $newQty ✓'),
+            backgroundColor: AppTheme.success,
+          ),
+        );
+      }
+    } catch (e) {
+      String msg = e.toString();
+      if (msg.startsWith('Exception: ')) msg = msg.substring(11);
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('❌ لا يمكن التعديل: $msg'),
+            backgroundColor: AppTheme.danger,
+            duration: const Duration(seconds: 4),
+          ),
+        );
+      }
+    }
+  }
+
+  // ─── حذف سجل حمولة ───────────────────────────────────────────────────────
+  Future<void> _deleteLoad(Map<String, dynamic> load, String workDayId) async {
+    final qty = load['initial_quantity'] is String
+        ? int.tryParse(load['initial_quantity'].toString()) ?? 0
+        : (load['initial_quantity'] as num?)?.toInt() ?? 0;
+
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('حذف سجل الحمولة'),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text('هل تريد حذف هذا السجل ($qty حبة)؟',
+                style: const TextStyle(color: AppTheme.textPrimary)),
+            const SizedBox(height: 8),
+            Container(
+              padding: const EdgeInsets.all(10),
+              decoration: BoxDecoration(
+                color: AppTheme.danger.withOpacity(0.07),
+                borderRadius: BorderRadius.circular(10),
+              ),
+              child: const Text(
+                'لا يمكن الحذف إذا كانت الكمية الكلية بعد الحذف\nأقل مما تم توزيعه فعلاً',
+                style: TextStyle(color: AppTheme.danger, fontSize: 11),
+              ),
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(ctx, false),
+              child: const Text('إلغاء')),
+          ElevatedButton(
+            style: ElevatedButton.styleFrom(backgroundColor: AppTheme.danger),
+            onPressed: () => Navigator.pop(ctx, true),
+            child: const Text('حذف'),
+          ),
+        ],
+      ),
+    );
+
+    if (confirmed != true) return;
+
+    try {
+      final repo = ref.read(inventoryLoadRepositoryProvider);
+      await repo.delete(load['id'] as String);
+      ref.read(globalRefreshProvider.notifier).refresh();
+      await _loadHistory(workDayId);
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('تم حذف السجل ✓'),
+            backgroundColor: AppTheme.success,
+          ),
+        );
+      }
+    } catch (e) {
+      String msg = e.toString();
+      if (msg.startsWith('Exception: ')) msg = msg.substring(11);
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('❌ لا يمكن الحذف: $msg'),
+            backgroundColor: AppTheme.danger,
+            duration: const Duration(seconds: 4),
+          ),
+        );
+      }
+    }
   }
 
   Future<void> _addLoad(String workDayId, String supplierId, dynamic costPriceRaw) async {
@@ -268,17 +442,66 @@ class _AddInventoryScreenState extends ConsumerState<AddInventoryScreen> {
                   )
                 else
                   ...selectedLoads.map((load) {
-                    final qty = load['initial_quantity']?.toString() ?? '0';
+                    final qty = load['initial_quantity'] is String
+                        ? int.tryParse(load['initial_quantity'].toString()) ?? 0
+                        : (load['initial_quantity'] as num?)?.toInt() ?? 0;
                     final timeStr = _formatTime(load['created_at'] as String? ?? '');
                     return Container(
                       margin: const EdgeInsets.only(bottom: 8),
-                      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
-                      decoration: BoxDecoration(color: AppTheme.cardBackground, borderRadius: BorderRadius.circular(12), border: Border.all(color: AppTheme.primary.withValues(alpha: 0.2))),
-                      child: Row(
-                        children: [
-                          Expanded(child: Text(timeStr, style: const TextStyle(color: AppTheme.textSecondary))),
-                          Text('$qty حبة', style: const TextStyle(color: AppTheme.success, fontWeight: FontWeight.bold, fontSize: 15)),
-                        ],
+                      decoration: BoxDecoration(
+                        color: AppTheme.cardBackground,
+                        borderRadius: BorderRadius.circular(12),
+                        border: Border.all(color: AppTheme.primary.withValues(alpha: 0.2)),
+                      ),
+                      child: Padding(
+                        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                        child: Row(
+                          children: [
+                            // الوقت
+                            Text(timeStr,
+                                style: const TextStyle(
+                                    color: AppTheme.textSecondary, fontSize: 13)),
+                            const Spacer(),
+                            // الكمية
+                            Container(
+                              padding: const EdgeInsets.symmetric(
+                                  horizontal: 12, vertical: 5),
+                              decoration: BoxDecoration(
+                                color: AppTheme.success.withOpacity(0.1),
+                                borderRadius: BorderRadius.circular(8),
+                              ),
+                              child: Text(
+                                '$qty حبة',
+                                style: const TextStyle(
+                                    color: AppTheme.success,
+                                    fontWeight: FontWeight.bold,
+                                    fontSize: 14),
+                              ),
+                            ),
+                            const SizedBox(width: 8),
+                            // زر التعديل
+                            IconButton(
+                              icon: const Icon(Icons.edit_outlined,
+                                  color: AppTheme.primary, size: 19),
+                              tooltip: 'تعديل الكمية',
+                              padding: EdgeInsets.zero,
+                              constraints: const BoxConstraints(
+                                  minWidth: 32, minHeight: 32),
+                              onPressed: () =>
+                                  _showEditLoadDialog(load, workDayId),
+                            ),
+                            // زر الحذف
+                            IconButton(
+                              icon: const Icon(Icons.delete_outline,
+                                  color: AppTheme.danger, size: 19),
+                              tooltip: 'حذف السجل',
+                              padding: EdgeInsets.zero,
+                              constraints: const BoxConstraints(
+                                  minWidth: 32, minHeight: 32),
+                              onPressed: () => _deleteLoad(load, workDayId),
+                            ),
+                          ],
+                        ),
                       ),
                     );
                   }).toList(),

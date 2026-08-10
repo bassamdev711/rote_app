@@ -1,9 +1,13 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:firebase_auth/firebase_auth.dart';
+import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import '../core/theme/app_theme.dart';
 import 'main/home_screen.dart';
 import 'auth/login_screen.dart';
+import 'auth/pending_approval_screen.dart';
+import 'auth/suspended_screen.dart';
 
 class SplashScreen extends ConsumerStatefulWidget {
   const SplashScreen({super.key});
@@ -42,16 +46,79 @@ class _SplashScreenState extends ConsumerState<SplashScreen>
     // الانتظار حتى تكتمل حركة البداية
     await Future.delayed(const Duration(milliseconds: 1200));
 
-    if (mounted) {
-      final user = FirebaseAuth.instance.currentUser;
-      if (user == null) {
-        Navigator.of(context).pushReplacement(
-          MaterialPageRoute(builder: (_) => const LoginScreen()),
-        );
-      } else {
-        Navigator.of(context).pushReplacement(
-          MaterialPageRoute(builder: (_) => const HomeScreen()),
-        );
+    if (!mounted) return;
+
+    final user = FirebaseAuth.instance.currentUser;
+    if (user == null) {
+      Navigator.of(context).pushReplacement(
+        MaterialPageRoute(builder: (_) => const LoginScreen()),
+      );
+    } else {
+      try {
+        final doc = await FirebaseFirestore.instance.collection('users').doc(user.uid).get();
+        if (doc.exists) {
+          final data = doc.data() as Map<String, dynamic>;
+          final status = data['status'] as String?;
+          final subEndTs = data['subscription_end_date'] as Timestamp?;
+          
+          final prefs = await SharedPreferences.getInstance();
+          if (status != null) await prefs.setString('cached_status', status);
+          if (subEndTs != null) await prefs.setInt('cached_sub_end', subEndTs.millisecondsSinceEpoch);
+
+          bool isExpired = false;
+          if (subEndTs != null) {
+            isExpired = subEndTs.toDate().isBefore(DateTime.now());
+          }
+
+          if (status == 'suspended' || isExpired) {
+            Navigator.of(context).pushReplacement(
+              MaterialPageRoute(builder: (_) => const SuspendedScreen()),
+            );
+          } else if (status == 'active' || status == 'approved') {
+            Navigator.of(context).pushReplacement(
+              MaterialPageRoute(builder: (_) => const HomeScreen()),
+            );
+          } else {
+            Navigator.of(context).pushReplacement(
+              MaterialPageRoute(builder: (_) => const PendingApprovalScreen()),
+            );
+          }
+        } else {
+          Navigator.of(context).pushReplacement(
+            MaterialPageRoute(builder: (_) => const PendingApprovalScreen()),
+          );
+        }
+      } catch (e) {
+        // Fallback in case of lack of internet, use local cache
+        try {
+          final prefs = await SharedPreferences.getInstance();
+          final cachedStatus = prefs.getString('cached_status');
+          final cachedSubEnd = prefs.getInt('cached_sub_end');
+          
+          bool isExpired = false;
+          if (cachedSubEnd != null) {
+            final endDate = DateTime.fromMillisecondsSinceEpoch(cachedSubEnd);
+            isExpired = endDate.isBefore(DateTime.now());
+          }
+          
+          if (cachedStatus == 'suspended' || isExpired) {
+            Navigator.of(context).pushReplacement(
+              MaterialPageRoute(builder: (_) => const SuspendedScreen()),
+            );
+          } else if (cachedStatus == 'active' || cachedStatus == 'approved') {
+            Navigator.of(context).pushReplacement(
+              MaterialPageRoute(builder: (_) => const HomeScreen()),
+            );
+          } else {
+            Navigator.of(context).pushReplacement(
+              MaterialPageRoute(builder: (_) => const HomeScreen()),
+            );
+          }
+        } catch (_) {
+          Navigator.of(context).pushReplacement(
+            MaterialPageRoute(builder: (_) => const HomeScreen()),
+          );
+        }
       }
     }
   }

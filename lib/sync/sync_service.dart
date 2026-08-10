@@ -5,6 +5,7 @@ import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import '../core/database/db_helper.dart';
 import '../repositories/transaction_repository.dart';
+import '../repositories/supplier_payment_repository.dart';
 
 class SyncService {
   final FirebaseFirestore _firestore = FirebaseFirestore.instance;
@@ -56,7 +57,11 @@ class SyncService {
       onProgress?.call("تمت المزامنة بنجاح ✓");
     } catch (e) {
       print("Sync Error: $e");
-      onProgress?.call("خطأ في المزامنة: $e");
+      if (e.toString().contains('permission-denied') || e.toString().contains('PERMISSION_DENIED')) {
+        onProgress?.call("حسابك قيد المراجعة أو معلق. يرجى انتظار موافقة الإدارة.");
+      } else {
+        onProgress?.call("خطأ في المزامنة: $e");
+      }
     }
   }
 
@@ -67,7 +72,7 @@ class SyncService {
           table,
           where: 'sync_status = ?',
           whereArgs: ['pending'],
-          limit: 500,
+          limit: 200,
         );
 
         if (pendingRecords.isEmpty) break;
@@ -79,6 +84,7 @@ class SyncService {
           
           data.remove('sync_status');
           data.remove('last_synced_at');
+          data['server_updated_at'] = FieldValue.serverTimestamp();
           
           final docRef = _firestore
               .collection('users')
@@ -88,6 +94,10 @@ class SyncService {
               
           batch.set(docRef, data, SetOptions(merge: true));
         }
+
+        // Update sync_meta to announce that this table has changed
+        final metaRef = _firestore.collection('users').doc(_uid).collection('sync_meta').doc('latest');
+        batch.set(metaRef, { table: FieldValue.serverTimestamp() }, SetOptions(merge: true));
 
         await batch.commit();
 
@@ -112,129 +122,177 @@ class SyncService {
   Future<void> _pullRemoteChanges(Database db) async {
     final Set<String> affectedCustomerIds = {};
     final Set<String> affectedWorkDayIds = {};
+    final Set<String> affectedSupplierIds = {};
+
+    Map<String, dynamic> remoteSyncMeta = {};
+    try {
+      final metaDoc = await _firestore.collection('users').doc(_uid).collection('sync_meta').doc('latest').get();
+      if (metaDoc.exists && metaDoc.data() != null) {
+        remoteSyncMeta = metaDoc.data()!;
+      }
+    } catch (e) {
+      print("Failed to fetch sync_meta: $e");
+    }
 
     for (String table in _tables) {
-      final String lastSyncKey = 'last_sync_${table}_$_uid';
-      String? lastSyncTimeStr = await _secureStorage.read(key: lastSyncKey);
-      
-      // If the local table is completely empty, we MUST do a full sync 
-      // regardless of what lastSyncTimeStr says, because we might have 
-      // recreated the database.
-      final int count = Sqflite.firstIntValue(await db.rawQuery('SELECT COUNT(*) FROM $table')) ?? 0;
-      if (count == 0) {
-        lastSyncTimeStr = null;
-      }
-
-      Query<Map<String, dynamic>> query = _firestore
-          .collection('users')
-          .doc(_uid)
-          .collection(table);
-
-      // Delta Sync: Only fetch documents modified since the last successful sync
-      if (lastSyncTimeStr != null) {
-        query = query.where('updated_at', isGreaterThan: lastSyncTimeStr).orderBy('updated_at');
-      }
-
-      bool hasMore = true;
-      DocumentSnapshot? lastDoc;
-      
-      while (hasMore) {
-        var paginatedQuery = query.limit(500);
-        if (lastDoc != null) {
-          paginatedQuery = paginatedQuery.startAfterDocument(lastDoc);
+      try {
+        final String lastSyncKey = 'last_sync_${table}_$_uid';
+        String? lastSyncTimeStr = await _secureStorage.read(key: lastSyncKey);
+        
+        // If the local table is completely empty, we MUST do a full sync 
+        // regardless of what lastSyncTimeStr says, because we might have 
+        // recreated the database.
+        final int count = Sqflite.firstIntValue(await db.rawQuery('SELECT COUNT(*) FROM $table')) ?? 0;
+        if (count == 0) {
+          lastSyncTimeStr = null;
         }
 
-        final querySnapshot = await paginatedQuery.get();
-
-        if (querySnapshot.docs.isEmpty) {
-          hasMore = false;
-          break;
+        // OPTIMIZATION: Check if this table has new data
+        if (lastSyncTimeStr != null && remoteSyncMeta.containsKey(table)) {
+           final serverTs = remoteSyncMeta[table];
+           if (serverTs is Timestamp) {
+              final remoteTableUpdate = serverTs.toDate().toUtc();
+              final localLastSync = DateTime.parse(lastSyncTimeStr);
+              if (!remoteTableUpdate.isAfter(localLastSync)) {
+                 // No new data! Skip this table entirely!
+                 continue;
+              }
+           }
         }
 
-        lastDoc = querySnapshot.docs.last;
+        Query<Map<String, dynamic>> query = _firestore
+            .collection('users')
+            .doc(_uid)
+            .collection(table);
 
-        final remoteIds = querySnapshot.docs.map((d) => d.data()['id'].toString()).toList();
+        // Delta Sync: Only fetch documents modified since the last successful sync
+        if (lastSyncTimeStr != null) {
+          try {
+             final date = DateTime.parse(lastSyncTimeStr);
+             query = query.where('server_updated_at', isGreaterThan: Timestamp.fromDate(date)).orderBy('server_updated_at');
+          } catch (e) {
+             query = query.orderBy(FieldPath.documentId);
+          }
+        } else {
+          query = query.orderBy(FieldPath.documentId);
+        }
 
-        await db.transaction((txn) async {
-          final placeholders = List.filled(remoteIds.length, '?').join(',');
-          final localRecords = await txn.query(table, where: 'id IN ($placeholders)', whereArgs: remoteIds);
-          final localRecordMap = { for (var rec in localRecords) rec['id'].toString(): rec };
+        bool hasMore = true;
+        DocumentSnapshot? lastDoc;
+        
+        while (hasMore) {
+          var paginatedQuery = query.limit(200);
+          if (lastDoc != null) {
+            paginatedQuery = paginatedQuery.startAfterDocument(lastDoc);
+          }
 
-          for (var doc in querySnapshot.docs) {
-            final data = doc.data();
-            final remoteId = data['id'].toString();
-            
-            if (['distributions', 'returns', 'collections'].contains(table) && data.containsKey('customer_id') && data['customer_id'] != null) {
-              affectedCustomerIds.add(data['customer_id'].toString());
-            }
-            if (['distributions', 'returns', 'collections', 'inventory_loads', 'supplier_returns', 'damaged_items'].contains(table) && data.containsKey('work_day_id') && data['work_day_id'] != null) {
-              affectedWorkDayIds.add(data['work_day_id'].toString());
-            }
+          final querySnapshot = await paginatedQuery.get();
 
-            // Fallback for older records lacking supplier_id
-            if ((table == 'distributions' || table == 'returns') && !data.containsKey('supplier_id')) {
-              data['supplier_id'] = 'unknown';
-            }
-            
-            data['sync_status'] = 'synced';
-            data['last_synced_at'] = DateTime.now().toUtc().toIso8601String();
+          if (querySnapshot.docs.isEmpty) {
+            hasMore = false;
+            break;
+          }
 
-            final localRecord = localRecordMap[remoteId];
-            
-            if (localRecord == null) {
-              await txn.insert(table, data, conflictAlgorithm: ConflictAlgorithm.replace);
-            } else {
-              final int localIsDeleted = (localRecord['is_deleted'] as num?)?.toInt() ?? 0;
-              final int remoteIsDeleted = (data['is_deleted'] as num?)?.toInt() ?? 0;
+          lastDoc = querySnapshot.docs.last;
 
-              if (remoteIsDeleted == 1 && localIsDeleted == 0) {
-                 // Remote is deleted, local is not. Remote delete ALWAYS wins!
-                 await txn.update(table, data, where: 'id = ?', whereArgs: [remoteId]);
-              } else if (localIsDeleted == 1 && remoteIsDeleted == 0) {
-                 // Local is deleted, remote is not. Local delete ALWAYS wins!
-                 // Do nothing. Next push will delete the remote.
+          final remoteIds = querySnapshot.docs.map((d) => d.data()['id'].toString()).toList();
+
+          await db.transaction((txn) async {
+            final placeholders = List.filled(remoteIds.length, '?').join(',');
+            final localRecords = await txn.query(table, where: 'id IN ($placeholders)', whereArgs: remoteIds);
+            final localRecordMap = { for (var rec in localRecords) rec['id'].toString(): rec };
+
+            for (var doc in querySnapshot.docs) {
+              final data = doc.data();
+              final remoteId = data['id'].toString();
+              
+              if (['distributions', 'returns', 'collections'].contains(table) && data.containsKey('customer_id') && data['customer_id'] != null) {
+                affectedCustomerIds.add(data['customer_id'].toString());
+              }
+              if (['distributions', 'returns', 'collections', 'inventory_loads', 'supplier_returns', 'damaged_items'].contains(table) && data.containsKey('work_day_id') && data['work_day_id'] != null) {
+                affectedWorkDayIds.add(data['work_day_id'].toString());
+              }
+              if (table == 'supplier_payments' && data.containsKey('supplier_id') && data['supplier_id'] != null) {
+                affectedSupplierIds.add(data['supplier_id'].toString());
+              }
+
+              // Fallback for older records lacking supplier_id
+              if ((table == 'distributions' || table == 'returns') && !data.containsKey('supplier_id')) {
+                data['supplier_id'] = 'unknown';
+              }
+              // Remove Firestore-specific fields before inserting into SQLite
+              // SQLite throws an error if a column doesn't exist in the schema,
+              // or if the data type is Timestamp.
+              data.remove('server_updated_at');
+              
+              data['sync_status'] = 'synced';
+              data['last_synced_at'] = DateTime.now().toUtc().toIso8601String();
+
+              final localRecord = localRecordMap[remoteId];
+              
+              if (localRecord == null) {
+                await txn.insert(table, data, conflictAlgorithm: ConflictAlgorithm.replace);
               } else {
-                  // Normal LWW
-                  final localUpdatedAt = localRecord['updated_at'] as String?;
-                  final remoteUpdatedAt = data['updated_at'] as String?;
-                  
-                  if (localUpdatedAt != null && remoteUpdatedAt != null) {
-                    DateTime localDate = DateTime.parse(localUpdatedAt);
-                    DateTime remoteDate = DateTime.parse(remoteUpdatedAt);
+                final int localIsDeleted = (localRecord['is_deleted'] as num?)?.toInt() ?? 0;
+                final int remoteIsDeleted = (data['is_deleted'] as num?)?.toInt() ?? 0;
+
+                if (remoteIsDeleted == 1 && localIsDeleted == 0) {
+                   // Remote is deleted, local is not. Remote delete ALWAYS wins!
+                   await txn.update(table, data, where: 'id = ?', whereArgs: [remoteId]);
+                } else if (localIsDeleted == 1 && remoteIsDeleted == 0) {
+                   // Local is deleted, remote is not. Local delete ALWAYS wins!
+                   // Do nothing. Next push will delete the remote.
+                } else {
+                    // Normal LWW
+                    final localUpdatedAt = localRecord['updated_at'] as String?;
+                    final remoteUpdatedAt = data['updated_at'] as String?;
                     
-                    if (remoteDate.isAfter(localDate)) {
+                    if (localUpdatedAt != null && remoteUpdatedAt != null) {
+                      DateTime localDate = DateTime.parse(localUpdatedAt);
+                      DateTime remoteDate = DateTime.parse(remoteUpdatedAt);
+                      
+                      if (remoteDate.isAfter(localDate)) {
+                         await txn.update(table, data, where: 'id = ?', whereArgs: [remoteId]);
+                      }
+                    } else {
                        await txn.update(table, data, where: 'id = ?', whereArgs: [remoteId]);
                     }
-                  } else {
-                     await txn.update(table, data, where: 'id = ?', whereArgs: [remoteId]);
-                  }
+                }
+              }
+            }
+          });
+
+          // Record the latest server_updated_at from this batch to save for next sync
+          String? latestUpdateInBatch = lastSyncTimeStr;
+          for (var doc in querySnapshot.docs) {
+            final serverTs = doc.data()['server_updated_at'];
+            String? docUpdatedAtStr;
+            if (serverTs is Timestamp) {
+              docUpdatedAtStr = serverTs.toDate().toUtc().toIso8601String();
+            }
+
+            if (docUpdatedAtStr != null) {
+              if (latestUpdateInBatch == null || DateTime.parse(docUpdatedAtStr).isAfter(DateTime.parse(latestUpdateInBatch))) {
+                latestUpdateInBatch = docUpdatedAtStr;
               }
             }
           }
-        });
 
-        // Record the latest updated_at from this batch to save for next sync
-        String? latestUpdateInBatch = lastSyncTimeStr;
-        for (var doc in querySnapshot.docs) {
-          final docUpdatedAtStr = doc.data()['updated_at'] as String?;
-          if (docUpdatedAtStr != null) {
-            if (latestUpdateInBatch == null || DateTime.parse(docUpdatedAtStr).isAfter(DateTime.parse(latestUpdateInBatch))) {
-              latestUpdateInBatch = docUpdatedAtStr;
-            }
+          if (latestUpdateInBatch != null) {
+            await _secureStorage.write(key: lastSyncKey, value: latestUpdateInBatch);
           }
         }
-
-        if (latestUpdateInBatch != null) {
-          await _secureStorage.write(key: lastSyncKey, value: latestUpdateInBatch);
-        }
+      } catch (e, stack) {
+        print("Error pulling table $table: $e\n$stack");
+        // We continue to the next table even if this one fails!
       }
     }
 
     // === POST-SYNC SWEEP (Multi-Device Integrity Check) ===
-    await _postSyncIntegritySweep(db, affectedCustomerIds, affectedWorkDayIds);
+    await _postSyncIntegritySweep(db, affectedCustomerIds, affectedWorkDayIds, affectedSupplierIds);
   }
 
-  Future<void> _postSyncIntegritySweep(Database db, Set<String> affectedCustomerIds, Set<String> affectedWorkDayIds) async {
+  Future<void> _postSyncIntegritySweep(Database db, Set<String> affectedCustomerIds, Set<String> affectedWorkDayIds, Set<String> affectedSupplierIds) async {
     if (affectedWorkDayIds.isEmpty) return;
     
     final placeholders = List.filled(affectedWorkDayIds.length, '?').join(',');
@@ -246,25 +304,40 @@ class SyncService {
       bool isClosed = wd['is_closed'] == 1;
       bool wasModifiedInSweep = false;
       
-      for (var prod in allProducts) {
-        String productId = prod['id'].toString();
+      final List<Map<String, dynamic>> productSupplierRows = await db.rawQuery('''
+        SELECT DISTINCT product_id, supplier_id FROM (
+          SELECT product_id, supplier_id FROM inventory_loads WHERE work_day_id = ? AND is_deleted = 0
+          UNION
+          SELECT product_id, supplier_id FROM distributions WHERE work_day_id = ? AND is_deleted = 0
+          UNION
+          SELECT product_id, supplier_id FROM returns WHERE work_day_id = ? AND is_deleted = 0
+          UNION
+          SELECT product_id, supplier_id FROM supplier_returns WHERE work_day_id = ? AND is_deleted = 0
+          UNION
+          SELECT product_id, supplier_id FROM damaged_items WHERE work_day_id = ? AND is_deleted = 0
+        )
+      ''', [workDayId, workDayId, workDayId, workDayId, workDayId]);
+
+      for (var psRow in productSupplierRows) {
+        String productId = psRow['product_id'].toString();
+        String supplierId = psRow['supplier_id'].toString();
         
         bool hasConflict = true;
         while (hasConflict) {
-          // 1. Calculate Available Inventory
-          var loads = await db.rawQuery('SELECT SUM(initial_quantity) as total FROM inventory_loads WHERE work_day_id = ? AND product_id = ? AND is_deleted = 0', [workDayId, productId]);
+          // 1. Calculate Available Inventory for this product and supplier
+          var loads = await db.rawQuery('SELECT SUM(initial_quantity) as total FROM inventory_loads WHERE work_day_id = ? AND product_id = ? AND supplier_id = ? AND is_deleted = 0', [workDayId, productId, supplierId]);
           double loaded = (loads.first['total'] as num?)?.toDouble() ?? 0.0;
 
-          var dists = await db.rawQuery('SELECT SUM(quantity) as total FROM distributions WHERE work_day_id = ? AND product_id = ? AND is_deleted = 0', [workDayId, productId]);
+          var dists = await db.rawQuery('SELECT SUM(quantity) as total FROM distributions WHERE work_day_id = ? AND product_id = ? AND supplier_id = ? AND is_deleted = 0', [workDayId, productId, supplierId]);
           double distributed = (dists.first['total'] as num?)?.toDouble() ?? 0.0;
 
-          var rets = await db.rawQuery('SELECT SUM(quantity) as total FROM returns WHERE work_day_id = ? AND product_id = ? AND is_deleted = 0', [workDayId, productId]);
+          var rets = await db.rawQuery('SELECT SUM(quantity) as total FROM returns WHERE work_day_id = ? AND product_id = ? AND supplier_id = ? AND is_deleted = 0', [workDayId, productId, supplierId]);
           double returned = (rets.first['total'] as num?)?.toDouble() ?? 0.0;
 
-          var srets = await db.rawQuery('SELECT SUM(quantity) as total FROM supplier_returns WHERE work_day_id = ? AND product_id = ? AND is_deleted = 0', [workDayId, productId]);
+          var srets = await db.rawQuery('SELECT SUM(quantity) as total FROM supplier_returns WHERE work_day_id = ? AND product_id = ? AND supplier_id = ? AND is_deleted = 0', [workDayId, productId, supplierId]);
           double supplierReturned = (srets.first['total'] as num?)?.toDouble() ?? 0.0;
 
-          var damages = await db.rawQuery('SELECT SUM(quantity) as total FROM damaged_items WHERE work_day_id = ? AND product_id = ? AND is_deleted = 0', [workDayId, productId]);
+          var damages = await db.rawQuery('SELECT SUM(quantity) as total FROM damaged_items WHERE work_day_id = ? AND product_id = ? AND supplier_id = ? AND is_deleted = 0', [workDayId, productId, supplierId]);
           double damaged = (damages.first['total'] as num?)?.toDouble() ?? 0.0;
 
           double available = loaded + returned - distributed - supplierReturned - damaged;
@@ -279,7 +352,7 @@ class SyncService {
             String? customerIdAffected;
 
             Future<void> checkLatest(String table, bool hasCustomer) async {
-              var rows = await db.query(table, where: 'work_day_id = ? AND product_id = ? AND is_deleted = 0', whereArgs: [workDayId, productId], orderBy: 'created_at DESC', limit: 1);
+              var rows = await db.query(table, where: 'work_day_id = ? AND product_id = ? AND supplier_id = ? AND is_deleted = 0', whereArgs: [workDayId, productId, supplierId], orderBy: 'created_at DESC', limit: 1);
               if (rows.isNotEmpty) {
                 DateTime d = DateTime.parse(rows.first['created_at'].toString());
                 if (latestDate == null || d.isAfter(latestDate!)) {
@@ -378,6 +451,13 @@ class SyncService {
       final repo = TransactionRepository();
       for (String customerId in affectedCustomerIds) {
         await repo.recalculateCustomerBalance(customerId);
+      }
+    }
+
+    if (affectedSupplierIds.isNotEmpty) {
+      final sRepo = SupplierPaymentRepository();
+      for (String supplierId in affectedSupplierIds) {
+        await sRepo.recalculateSupplierBalance(supplierId);
       }
     }
   }

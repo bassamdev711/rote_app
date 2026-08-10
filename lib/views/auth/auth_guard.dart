@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import 'login_screen.dart';
 import 'pending_approval_screen.dart';
 import 'suspended_screen.dart';
@@ -28,12 +29,24 @@ class AuthGuard {
       if (context.mounted) Navigator.pop(context); // close loading
 
       if (doc.exists) {
-        final status = doc.data()?['status'] as String?;
-        if (status == 'approved') {
+        final data = doc.data() as Map<String, dynamic>;
+        final status = data['status'] as String?;
+        final subEndTs = data['subscription_end_date'] as Timestamp?;
+        
+        final prefs = await SharedPreferences.getInstance();
+        if (status != null) await prefs.setString('cached_status', status);
+        if (subEndTs != null) await prefs.setInt('cached_sub_end', subEndTs.millisecondsSinceEpoch);
+
+        bool isExpired = false;
+        if (subEndTs != null) {
+          isExpired = subEndTs.toDate().isBefore(DateTime.now());
+        }
+
+        if (status == 'suspended' || isExpired) {
+          _navigateToSuspended(context);
+        } else if (status == 'active' || status == 'approved') {
           // Success! Run the action.
           action();
-        } else if (status == 'suspended') {
-          _navigateToSuspended(context);
         } else {
           // Pending or other status
           _navigateToPending(context);
@@ -44,10 +57,35 @@ class AuthGuard {
       }
     } catch (e) {
       if (context.mounted) Navigator.pop(context); // close loading
-      if (context.mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('خطأ في التحقق من الحساب: $e')),
-        );
+      
+      try {
+        final prefs = await SharedPreferences.getInstance();
+        final cachedStatus = prefs.getString('cached_status');
+        final cachedSubEnd = prefs.getInt('cached_sub_end');
+        
+        bool isExpired = false;
+        if (cachedSubEnd != null) {
+          final endDate = DateTime.fromMillisecondsSinceEpoch(cachedSubEnd);
+          isExpired = endDate.isBefore(DateTime.now());
+        }
+        
+        if (cachedStatus == 'suspended' || isExpired) {
+          if (context.mounted) _navigateToSuspended(context);
+        } else if (cachedStatus == 'active' || cachedStatus == 'approved') {
+          action();
+        } else {
+          if (context.mounted) {
+            ScaffoldMessenger.of(context).showSnackBar(
+              SnackBar(content: Text('خطأ في الاتصال بالشبكة: $e')),
+            );
+          }
+        }
+      } catch (_) {
+        if (context.mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(content: Text('خطأ في التحقق من الحساب: $e')),
+          );
+        }
       }
     }
   }

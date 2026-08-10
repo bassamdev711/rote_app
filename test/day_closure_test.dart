@@ -80,7 +80,7 @@ void main() async {
     await wdRepo.closeWorkDay(day1Id);
     print('✅ نجاح: تم إغلاق اليوم الأول بعد تصفية الرصيد.');
   } catch (e) {
-    print('❌ فشل: لم يتمكن من إغلاق اليوم. الخطأ: \$e');
+    print('❌ فشل: لم يتمكن من إغلاق اليوم. الخطأ: $e');
   }
 
   // Attempt to distribute in Day 1
@@ -88,6 +88,7 @@ void main() async {
     await txRepo.insertDistribution(Distribution(
       workDayId: day1Id,
       customerId: customerId,
+      supplierId: 'default',
       productId: productId,
       quantity: 10,
       price: 100.0,
@@ -95,7 +96,7 @@ void main() async {
     ));
     print('❌ فشل: تم السماح بإضافة توزيع في يوم مغلق!');
   } catch (e) {
-    print('✅ نجاح: تم منع التوزيع في اليوم المغلق بنجاح. (\$e)');
+    print('✅ نجاح: تم منع التوزيع في اليوم المغلق بنجاح. ($e)');
   }
 
   // --- اختبار 2: التحصيل في يوم مغلق ---
