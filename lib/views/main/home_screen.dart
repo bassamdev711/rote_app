@@ -6,18 +6,16 @@ import '../../providers/daily_inventory_provider.dart';
 import '../../providers/customer_provider.dart';
 import '../../providers/distributor_provider.dart';
 import '../../providers/broadcast_provider.dart';
-import '../customers/customers_screen.dart';
-import '../distribution/distribution_screen.dart';
 import '../reports/reports_screen.dart';
 import '../settings/settings_screen.dart';
-import '../suppliers/supplier_accounts_screen.dart';
 import '../auth/auth_guard.dart';
+import '../distribution/distribution_screen.dart';
+import 'sync_dialog.dart';
 import '../auth/login_screen.dart';
 
 import 'new_day_screen.dart';
 import 'add_inventory_screen.dart';
 import 'days_review_screen.dart';
-import 'main_screen.dart';
 import '../../core/theme/app_theme.dart';
 
 class HomeScreen extends ConsumerWidget {
@@ -58,15 +56,25 @@ class HomeScreen extends ConsumerWidget {
                 pinned: true,
                 backgroundColor: AppTheme.primary,
                 actions: [
-                  // ☁️ زر المزامنة
-                  TextButton.icon(
-                    icon: const Icon(Icons.cloud_sync, color: Colors.white),
-                    label: const Text('مزامنة', style: TextStyle(color: Colors.white, fontSize: 14, fontWeight: FontWeight.bold)),
+                  IconButton(
+                    icon: const Icon(Icons.cloud_upload_outlined, color: Colors.white),
+                    tooltip: 'تصدير للسحابة',
                     onPressed: () {
                       showDialog(
                         context: context,
                         barrierDismissible: false,
-                        builder: (ctx) => const SyncDialog(),
+                        builder: (ctx) => const SyncDialog(isPush: true),
+                      );
+                    },
+                  ),
+                  IconButton(
+                    icon: const Icon(Icons.cloud_download_outlined, color: Colors.white),
+                    tooltip: 'استيراد من السحابة',
+                    onPressed: () {
+                      showDialog(
+                        context: context,
+                        barrierDismissible: false,
+                        builder: (ctx) => const SyncDialog(isPush: false),
                       );
                     },
                   ),
@@ -173,63 +181,32 @@ class HomeScreen extends ConsumerWidget {
                             fontSize: 16,
                             fontWeight: FontWeight.bold)),
                     const SizedBox(height: 12),
-                    GridView.count(
-                      shrinkWrap: true,
-                      physics: const NeverScrollableScrollPhysics(),
-                      crossAxisCount: 2,
-                      mainAxisSpacing: 12,
-                      crossAxisSpacing: 12,
-                      childAspectRatio: 1.6,
+                    Row(
                       children: [
-                        // العملاء
-                        _buildActionTile(
-                          context,
-                          Icons.people,
-                          'العملاء',
-                          'إدارة العملاء',
-                          const Color(0xFF8B5CF6),
-                          () => AuthGuard.run(context, () => Navigator.push(context,
-                              MaterialPageRoute(builder: (_) => const CustomersScreen()))),
-                        ),
                         // التقارير
-                        _buildActionTile(
-                          context,
-                          Icons.bar_chart,
-                          'التقارير',
-                          'التقارير اليومية',
-                          AppTheme.success,
-                          () => AuthGuard.run(context, () => Navigator.push(context,
-                              MaterialPageRoute(builder: (_) => const ReportsScreen()))),
+                        Expanded(
+                          child: _buildActionTile(
+                            context,
+                            Icons.bar_chart,
+                            'التقارير',
+                            'التقارير اليومية',
+                            AppTheme.success,
+                            () => AuthGuard.run(context, () => Navigator.push(context,
+                                MaterialPageRoute(builder: (_) => const ReportsScreen()))),
+                          ),
                         ),
+                        const SizedBox(width: 12),
                         // مراجعة الأيام
-                        _buildActionTile(
-                          context,
-                          Icons.history,
-                          'مراجعة الأيام',
-                          'الأيام السابقة',
-                          const Color(0xFFF43F5E),
-                          () => AuthGuard.run(context, () => Navigator.push(context,
-                              MaterialPageRoute(builder: (_) => const DaysReviewScreen()))),
-                        ),
-                        // حسابات المخابز
-                        _buildActionTile(
-                          context,
-                          Icons.store_mall_directory_rounded,
-                          'حسابات المخابز',
-                          'كشوفات وأرصدة',
-                          const Color(0xFF0EA5E9), // Light Blue
-                          () => AuthGuard.run(context, () => Navigator.push(context,
-                              MaterialPageRoute(builder: (_) => const SupplierAccountsScreen()))),
-                        ),
-                        // الإعدادات
-                        _buildActionTile(
-                          context,
-                          Icons.settings,
-                          'الإعدادات',
-                          'الأصناف والضبط',
-                          AppTheme.warning,
-                          () => AuthGuard.run(context, () => Navigator.push(context,
-                              MaterialPageRoute(builder: (_) => const SettingsScreen()))),
+                        Expanded(
+                          child: _buildActionTile(
+                            context,
+                            Icons.history,
+                            'مراجعة الأيام',
+                            'الأيام السابقة',
+                            const Color(0xFFF43F5E),
+                            () => AuthGuard.run(context, () => Navigator.push(context,
+                                MaterialPageRoute(builder: (_) => const DaysReviewScreen()))),
+                          ),
                         ),
                       ],
                     ),

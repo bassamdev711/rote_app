@@ -8,6 +8,7 @@ import '../../providers/global_refresh_provider.dart';
 import '../../providers/product_provider.dart';
 import '../../models/product.dart';
 import '../../models/customer.dart';
+import '../suppliers/supplier_accounts_screen.dart';
 import 'suppliers_list_screen.dart';
 import '../customers/customers_screen.dart';
 import '../../core/utils/app_utils.dart';
@@ -198,6 +199,18 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
             onTap: () => Navigator.push(
               context,
               MaterialPageRoute(builder: (_) => const SuppliersListScreen()),
+            ),
+          ),
+          const SizedBox(height: 8),
+          _settingsTile(
+            context,
+            icon: Icons.receipt_long_outlined,
+            iconColor: const Color(0xFF0EA5E9),
+            title: 'حسابات وكشوفات المخابز',
+            subtitle: 'كشوفات الحساب والأرصدة للمخابز',
+            onTap: () => Navigator.push(
+              context,
+              MaterialPageRoute(builder: (_) => const SupplierAccountsScreen()),
             ),
           ),
           const SizedBox(height: 8),

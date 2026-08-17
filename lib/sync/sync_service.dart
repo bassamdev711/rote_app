@@ -65,6 +65,64 @@ class SyncService {
     }
   }
 
+  Future<void> pushData({Function(String)? onProgress}) async {
+    if (_uid == null) {
+      onProgress?.call("خطأ: لم يتم تسجيل الدخول");
+      return;
+    }
+
+    final connectivityResult = await (Connectivity().checkConnectivity());
+    if (connectivityResult.contains(ConnectivityResult.none)) {
+      onProgress?.call("خطأ: لا يوجد اتصال بالإنترنت");
+      return;
+    }
+
+    try {
+      Database db = await _dbHelper.database;
+      
+      onProgress?.call("جاري رفع البيانات إلى السحابة...");
+      await _pushLocalChanges(db);
+
+      onProgress?.call("تمت عملية الرفع بنجاح ✓");
+    } catch (e) {
+      print("Push Error: $e");
+      if (e.toString().contains('permission-denied') || e.toString().contains('PERMISSION_DENIED')) {
+        onProgress?.call("حسابك قيد المراجعة أو معلق. يرجى انتظار موافقة الإدارة.");
+      } else {
+        onProgress?.call("خطأ في عملية الرفع: $e");
+      }
+    }
+  }
+
+  Future<void> pullData({Function(String)? onProgress}) async {
+    if (_uid == null) {
+      onProgress?.call("خطأ: لم يتم تسجيل الدخول");
+      return;
+    }
+
+    final connectivityResult = await (Connectivity().checkConnectivity());
+    if (connectivityResult.contains(ConnectivityResult.none)) {
+      onProgress?.call("خطأ: لا يوجد اتصال بالإنترنت");
+      return;
+    }
+
+    try {
+      Database db = await _dbHelper.database;
+      
+      onProgress?.call("جاري سحب البيانات من السحابة...");
+      await _pullRemoteChanges(db);
+
+      onProgress?.call("تمت عملية التنزيل بنجاح ✓");
+    } catch (e) {
+      print("Pull Error: $e");
+      if (e.toString().contains('permission-denied') || e.toString().contains('PERMISSION_DENIED')) {
+        onProgress?.call("حسابك قيد المراجعة أو معلق. يرجى انتظار موافقة الإدارة.");
+      } else {
+        onProgress?.call("خطأ في عملية التنزيل: $e");
+      }
+    }
+  }
+
   Future<void> _pushLocalChanges(Database db) async {
     for (String table in _tables) {
       while (true) {
